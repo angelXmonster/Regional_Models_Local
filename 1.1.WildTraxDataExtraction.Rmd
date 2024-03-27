@@ -415,7 +415,7 @@ dat.wt <- dat.tmtt %>%
          distance= ifelse(is.na(distance_max), Inf, distance_max),
          duration_replace= gsub("min","", survey_duration_method), #replace min
          duration_max= as.integer(tail(unlist(strsplit(duration_replace,"-", " ")), n=1)),   #select the last number
-         duration=ifelse(is.na(duration_max), as.numeric(gsub("s","", task_duration)), duration_max),
+         duration=ifelse(is.na(duration_max), as.numeric(gsub("s","", task_duration))/60, duration_max),
          tag_method=ifelse(is.na(task_method) & sensor=="PC", "PC", task_method)) %>%
   dplyr::select(-distance_replace, -duration_replace, -task_method) #Drop the unnecessary variable
 ```
