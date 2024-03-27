@@ -1,0 +1,451 @@
+---
+title: "1.1.WildTraxDataExtraction"
+author: "Angela Moreras"
+date: "2024-02-20"
+output: html_document
+---
+
+This document is based on the workflow produce by Elly Knight to produce BAM's National models v5, however, it was produce to be a more general version using the WildRTrax package (version 1.1.0, be aware that functions and arguments can change between versions) and limiting the data points to the extent of the Study Area. 
+In this first section we are going to extract data from WildTrax. 
+Note also that data is not standardize in a particular way in WildTrax nor in wildRtrax, and therefore, columns and the type of data of each column can change. 
+
+To log in in the WildTrax one needs to have credentials. To avoid reveling sensitive information in the script credentials need to be loaded by each user using the Sys.setenv function in this format: 
+Sys.setenv(WT_USERNAME = "guest", WT_PASSWORD = "Apple123") 
+where the username and the password will be replaced by the credentials each person has.
+
+It requires to download the wildRtrax package (to download it follow instruction in https://github.com/ABbiodiversity/wildRtrax)
+ 
+
+Input objects:
+-> bcr.sa is a shapefile that contain the study area with BCR limits. 
+Note it is run in 00.StudyAreaPrep.Rmd but loaded here
+
+Output objects; 
+->dat: raw wildtrax data
+->project.report: report of projects included
+->use.wt: dataset to use in further steps of workflow
+
+#0 Prep
+
+Load packages
+```{r, echo=F, results = F}
+library(tidyverse) #basic data wrangling
+library(wildRtrax) #to download data from wildtrax
+library(data.table) #for binding lists into dataframes
+library(lubridate) #date wrangling
+library(purrr) #Mapping functions to read in multiple files
+library(sf) #read in & handle study area
+library(terra) #raster management
+library(dggridR) #to make grid for checking for duplicates
+library(R.utils) #to create a timer for the downloading loop
+library(arsenal)
+```
+##0.1. Load study area
+Load study area and projection specificity 
+```{r}
+root.drive <- "G:/Shared drives/BAM_NationalModels/NationalModels5.0/Data"
+root= "C:/Users/Angie/OneDrive - Université Laval/Regional_models/Analisis_RM"
+
+load(file.path(root, "StudyArea","StudyArea.Rdata"))
+```
+
+
+##0.2. Clean and standaridize wildtrax columns function
+ 
+Given that different projects can have in a given column different types of data. 
+There is need to set the right type for each column. 
+
+Both sensor types are going to be compile in the same data frame to save a backup of the whole data being used.
+However, for ARU we need to change the two columns to avoid conflicts with PC data. 
+Additionally, both survey_date and recording_date_time are now compile in date column 
+
+For ARU data also, all tasks with task_method "None" are going to be excluded
+
+I also use this function to bring only the data we are interested in. 
+
+NOTE: variables selected may differ depending in the data needed from wildtrax
+Variables drop for the EHJV (in # the justification): 
+* equipment_make        #all NA
+* equipment_model       #all NA
+* vocalization          #unnecessary information
+* comments              #unnecessary information
+* observer              #Sensitive data 
+
+Finally we set WildTrax as source and extract the year the data was collected 
+
+```{r, echo=FALSE}
+w_clean_download<-function (rawdata){
+  
+  if (any(str_detect(colnames(rawdata),"aru"))){  #selecting ARU
+    
+    rawdata<-rawdata%>% 
+      #establish column type
+      mutate(across(c(organization, location, equipment_make, equipment_model, aru_task_status, task_duration, 
+                      task_method, species_code, species_common_name, species_scientific_name, individual_count, 
+                      vocalization, tag_is_verified, observer, species_individual_comments, task_comments), 
+                    as.character),
+             across(c(project_id, location_id, location_buffer_m, recording_id, task_id, individual_order, tag_id,
+                      observer_id), 
+                    as.integer),
+             across(c(longitude,latitude,detection_time,tag_duration),
+                    as.numeric),
+             )%>%           
+      #rename columns
+      rename (date= recording_date_time, 
+              aru_detection_time=detection_time)%>% 
+      #select columns 
+      select(organization, project_id, location_id, longitude, latitude, recording_id, date, location_buffer_m,
+              task_id, aru_task_status, task_duration,task_method, aru_detection_time, species_code,
+              species_scientific_name, individual_order,individual_count, date, observer_id)%>% 
+      #exclude task_method "None"
+      filter(task_method!="None")
+  }
+  
+  else { #selecting PC
+    
+    rawdata<-rawdata%>% 
+      #establish column type
+      mutate(across(c(organization, project, location, survey_url, observer, survey_duration_method, 
+                      survey_distance_method, detection_distance, detection_time, species_code, species_common_name,
+                      species_scientific_name, individual_count, detection_heard, detection_seen,detection_comments),
+                    as.character),
+             across(c(project_id, location_id, location_buffer_m, survey_id), 
+                    as.integer),
+             across(c(longitude,latitude),
+                    as.numeric),
+             )%>%           
+      #rename columns
+      rename (date= survey_date)%>%   
+      #select columns 
+      select(organization, project, project_id, location_id, longitude, latitude, survey_id, date, 
+              survey_distance_method,survey_duration_method, detection_time, location_buffer_m,
+              detection_distance, species_code, species_common_name, species_scientific_name,individual_count, date)
+  }
+  
+  rawdata <- rawdata %>% 
+  mutate(source = "WildTrax", 
+         date = ymd_hms(date), #Set the right date type
+         year = year(date))    #Extract the year 
+}
+
+```
+
+Data from WildTrax can be downloaded in two was: manually from their webpage or using wildRtrax. 
+Currently is faster to dowload data manually, but here we have code for both options.
+If data is download manually start in point 1 and skip point 2. 
+If data is download using wildRtrax skip point 1 and start in point 2.
+
+#1.Download data manually
+If data is downloaded manually, please ensure that the folder keeps the same structure root + /wildTrax_manual, to the code works properly 
+Note: files need to be uncompressed 
+
+##1.1. List of files 
+
+```{r}
+wt.files <- list.files(file.path(root, "/wildTrax_manual"),recursive = TRUE, pattern="main_report")
+```
+
+##1.2. Loop through files to crop data to study area
+
+```{r, results='hide'}
+
+projects.report<-as.data.frame(matrix(ncol=2, nrow=length(wt.files)))
+colnames(projects.report) <- c("project_id", "download")
+dat <- data.frame() 
+  
+for(i in 1:length(wt.files)){
+  
+  report.try <- read.csv(file.path(root, "wildTrax_manual", wt.files[i])) #Read file 
+  
+  projects.report$project_id[i]<- report.try$project_id[1] #Create report with project_id
+  
+  report.try<-report.try[which(!is.na(report.try$longitude)),] %>% #get rid of NAs  
+    w_clean_download()                                             #Set column type
+  report.try.sh <- report.try %>% 
+                    distinct(location_id, .keep_all = TRUE)%>% #use only unique locations
+                    sf::st_as_sf(coords = c("longitude", "latitude"), crs=projection.st_as_sf) %>% 
+                                                              #transform data to shape file
+                    st_transform(projection.trans) %>%        #Change projection to match
+                    st_crop(bcr.sa)                           #Crop data point to the extent of study area
+      
+                                                                              
+  if (nrow(report.try.sh)!=0){
+      print (paste("in intersection", i))
+      
+      report.try.sh.re<-st_intersection(report.try.sh, bcr.sa) #get rid of points outside 
+                                                                #the Study Area
+      if (nrow(report.try.sh.re)==0){
+        projects.report$download[i]= "No match"
+        next
+      }
+      
+      projects.report$download[i]<- paste0("Match ", Sys.Date())
+      
+      unique.loc<- report.try.sh.re$location_id  #extract unique locations 
+      #filter the original report using the unique locations
+      report.try.re<- report.try %>% filter(location_id %in% unique.loc) %>% 
+                       #Assign sensor 
+                       mutate(sensor=ifelse(any(str_detect(colnames(report.try),"aru")),"ARU","PC"))                   
+      dat <- dat%>% 
+        bind_rows(report.try.re)
+  }
+  
+  else{
+    projects.report$download[i]= "No match"
+    next
+  }    
+  
+  print(paste0("Finished dataset ", i, " of ", nrow(projects.report), " projects"))
+}
+
+```
+##1.3. Missing projects?
+
+From decompressing the downloaded data some files where impossible to extract so, I got the feeling that some projects were missing.To see which projects may be missing. We are going to log in Wildtrax and  bring the list of projects we have access to. Sensor_id= "PC" strangely also brings all ARU projects. 
+
+```{r}
+wt_auth() 
+
+projects <- wt_get_download_summary(sensor_id = 'PC') %>% select( project, project_id, sensor, tasks, status)
+```
+
+However, this also helps me to create a full report of the projects, so I can include the name of the project and the sensor type.  
+```{r}
+full.projects<- projects%>%
+  full_join(projects.report)
+```
+See which files are missing
+```{r}
+missing<-full.projects[which(is.na(full.projects$download)),]
+```
+
+If missing projects are important for your project download the remaining projects and added to dat
+
+##1.4. Save raw data
+
+Data is saved along with the date stamp
+
+```{r, echo=FALSE}
+
+#root= "C:/Users/ANMOD4/OneDrive - Université Laval/Regional_models/Analisis_RM"
+save(dat, full.projects, file=paste0(root, "/Wildtrax/wildtrax_rawManual&projects_", Sys.Date(), ".Rdata"))
+```
+
+
+#2. Download data with wildRtrax
+
+##2.1. Login to WildTrax
+
+Do not forget to load your WildTrax credentials beforehand otherwise this chunk is not going to run
+
+```{r}
+wt_auth() 
+```
+##2.2. List of projects
+In this point point counts and ARU are select by selecting the option sensor = PC. Select the relevant columns 
+
+```{r}
+projects <- wt_get_download_summary(sensor_id = 'PC') %>% select( project, project_id, sensor, tasks, status)
+```
+
+Get rid of the projects that are listed as "DO NOT USE" in the projectInventory file. 
+
+```{r}
+avoid<-read.csv (file.path(root.drive,"/ProjectInventory/projectInstructions.csv"))
+avoid.projects<-avoid$project_id[which(avoid$instruction=="DO NOT USE")]
+
+projects.clean<- projects[!projects$project_id %in% avoid.projects,]
+```
+
+```{r, echo=FALSE}
+#To be used to find issues with some projects 
+eh14_raw <- wt_download_report(
+  project_id = 659,
+  sensor_id = "ARU",
+  report = "main",
+  weather_cols = FALSE
+)
+
+eh14_clean<-w_clean_download(eh14_raw)
+```
+##2.3. Loop through projects to download data
+
+Data points that are outside the study area are going to be discarded here first by filtering by latitude and longitude (using st_crop), and then by the extent of the study area (using st_intersection). This was done trying to reduce the computational time. 
+
+NOTE: some projects have issues to be download given their size (i.e., too large) depending on your laptop and internet speed they will or not be downloaded.
+After the loop is completed a report is going to be in the report.projects object to check which projects were downloaded and which ones need to be downloaded manually. 
+
+```{r, results='hide'}
+dat2 <- data.frame()               #empty object
+seconds.per.min<- 60               #seconds in one min
+wait<-30                           #minutes to wait
+
+projects.clean$download<-NA              #create the download column
+
+
+for(i in 1:nrow(projects.clean)){
+  
+  response<-withTimeout({         #timer to stop downloading after a set time
+  report.try <- try(wt_download_report(project_id = projects.clean$project_id[i],  #Download wildtrax project
+                                       sensor = projects.clean$sensor[i], 
+                                       weather_cols = F, 
+                                       report = "main")
+                    )
+  }, timeout = seconds.per.min*wait)#time to elapse 
+
+  if (is.character(response)){
+    projects.clean$download[i]="Reached time limit"    #enter here if the time limit was reached
+    next
+  }
+  if (!is.data.frame(report.try)){
+    projects.clean$download[i]= "Not a data frame" #enter here if is not a data frame
+    next
+  }
+  
+  report.try<-report.try[which(!is.na(report.try$longitude)),] %>% #get rid of NAs  
+    w_clean_download()                                             #Set column type
+  report.try.sh <- report.try %>% 
+                    distinct(location_id, .keep_all = TRUE)%>% #use only unique locations
+                    sf::st_as_sf(coords = c("longitude", "latitude"), crs=projection.st_as_sf) %>% 
+                                                              #transform data to shape file
+                    st_transform(projection.trans) %>%        #Change projection to match
+                    st_crop(bcr.sa)                           #Crop data point to the extent of study area
+      
+                                                                              
+  if (nrow(report.try.sh)!=0){
+      print (paste("Match", i))
+
+      report.try.sh.re<-st_intersection(report.try.sh, bcr.sa) #get rid of points outside 
+                                                                #the Study Area
+      if (nrow(report.try.sh.re)==0){
+        projects.clean$download[i]= "No match"
+        next
+      }
+      
+      projects.clean$download[i]<- paste0("Match ", Sys.Date())
+      
+      unique.loc<- as.numeric(report.try.sh.re$location_id) #change location_id to numeric 
+      report.try.re<- report.try %>% filter(location_id %in% unique.loc) %>% 
+        #filter the original report using the unique locations
+                       mutate(sensor=projects.clean$sensor[i])                     #Assign sensor 
+                                          
+      if(projects.clean$sensor[i]=="ARU"){
+        report.try.re<-report.try.re %>% 
+          mutate(project=projects.clean$project[i])
+
+      }
+      
+      dat2 <- dat2%>% 
+        bind_rows(report.try.re)
+  }
+  
+  else{
+    projects.clean$download[i]= "No match"
+    next
+  }    
+  
+  print(paste0("Finished dataset ", projects.clean$project[i], " : ", i, " of ", nrow(projects.clean), " projects"))
+}
+
+projects.clean$download %>% replace_na("Manually download")
+```
+It is possible that over(test.points, oceans) is a faster way to crop the points I did not test it. Maybe in the second round of downloading
+
+
+Show the report of the projects
+```{r}
+report.projects<-projects.clean%>% select (project, project_id, download)
+
+head (report.projects)
+```
+
+##2.4. Save raw data
+
+Data is saved along with the date stamp
+
+```{r, echo=FALSE}
+
+#root= "C:/Users/ANMOD4/OneDrive - Université Laval/Regional_models/Analisis_RM"
+save(dat, projects, file=paste0(root, "/wildtrax_raw&projects_", Sys.Date(), ".Rdata"))
+```
+
+#3. Wrangle
+
+Note that for the National Models there were entries for the equiment_make column, that refers to the equipment use to collect the data (Double check that this is the case); however, there is no data entry for the EHJV project, therefore, that part of point 5 is not followed here.  
+
+```{r}
+load(file.path(root, "wildtrax_raw_2024-03-05.Rdata"))
+
+#load(file.path(root.drive,"WildTrax/", "wildtrax_raw_2023-01-20.Rdata"))
+load(file.path(root.drive,"WildTrax/", "wildtrax_rawManual&projects_2024-03-21.Rdata"))
+```
+
+  
+##4.2 Get list of bird species
+
+```{r}
+library(QPAD)
+load_BAM_QPAD(3)
+spp <- QPAD::getBAMspecieslist()
+```
+
+##4.2. Replace tmtt
+
+First get rid of species that are not birds and birds from which we can calculate offsets (using QPAD). Then fix the individual count label as tmtt (i.e., too many to tag) in the ARU sensor using the wt_replace_tmtt function which considers the observer_id. 
+
+```{r}
+dat.tmtt <- dat %>%
+  filter(species_code %in% spp)%>%                #filter species 
+  wt_replace_tmtt()%>%                            #replace tmmtt
+  mutate(across(individual_count, as.integer))%>% #change individual_count to integer
+  filter(!is.na(individual_count))                #get rid of NAs
+```
+
+##4.3. Caclulate duration and distance
+
+Here we extract the maximum survey distance and duration. Now we extract both values are now going to be sorted in two new columns called duration and distance along with the duration of the ARU task in min rather than seconds. 
+Also we fix the task_method so that all PC data points are no longer NA but "PC".
+
+```{r}
+dat.wt <- dat.tmtt %>%  
+  rowwise() %>%       #to iterate over data frame
+  mutate(distance_replace= gsub("m","", survey_distance_method), #replace m
+         distance_max= ifelse(any(str_detect(distance_replace,"INF")), Inf, #is it INF?
+                              as.integer(tail(unlist(strsplit(distance_replace,"-", " ")), n=1))), #select the last number
+         distance= ifelse(is.na(distance_max), Inf, distance_max),
+         duration_replace= gsub("min","", survey_duration_method), #replace min
+         duration_max= as.integer(tail(unlist(strsplit(duration_replace,"-", " ")), n=1)),   #select the last number
+         duration=ifelse(is.na(duration_max), as.numeric(gsub("s","", task_duration)), duration_max),
+         tag_method=ifelse(is.na(task_method) & sensor=="PC", "PC", task_method)) %>%
+  dplyr::select(-distance_replace, -duration_replace, -task_method) #Drop the unnecessary variable
+```
+
+##4.3. Calculate abundance and select columns
+
+Here it is important to highlight that PC individual_count is the abundance for each location; however, the abundance is more complicated. ARU recordings can by transcribe by two different methods: 1 tag per individual per species per minute (i.e., 1SPM) and 1 tag per individual per species per task (i.e., 1SPT). This means that for 1SPM a new row is added per individual per species per minute (if it is heard in the subsequent minutes). Moreover, the ARU observer can establish in the individual_count column how many individuals are in each detection (box detection, for more details see https://wildtrax.ca/resources/user-guide/#acoustic-data), but the individual_order column keeps the record of how many individuals of the same species where heard in the recording. In other words, if you hear two Ovenbirds (OVEN), the first individual would be tagged as “1” and the second OVEN as “2”, and therefore the abundance is 2. Yet because we have some case where the individual_order does not reflect all the individual that are in the individual_count, as well as the tmtt cases, we need to sum those.  
+
+
+Here we also select the columns of interest for the next steps of the modeling workflow. 
+  
+```{r}
+use.wt<-dat.wt%>%
+  group_by(organization, project_id, sensor, location_id, recording_id, date, task_id, tag_method, observer_id,
+           species_code) %>%                                    #group to find the abundance
+  mutate(abundance= ifelse(tag_method=="PC", individual_count,  #calculate abundance
+                           ifelse(tag_method=="1SPM" & any(individual_count>=1), sum(individual_count),
+                                  max(individual_order)))) %>%           
+  ungroup()%>%                                                  #ungroup 
+  group_by(organization, project_id, sensor, location_id, recording_id, date, task_id, tag_method, observer_id) %>%    distinct(species_code, .keep_all = TRUE)%>%                   #group and eliminate duplicates
+  ungroup()%>%                                                  #ungroup                                 
+  select (source, organization, project_id, sensor, tag_method,location_id, location_buffer_m, latitude, 
+          longitude,year, date,  observer_id, duration, distance, species_code, abundance) #select columns
+```
+
+
+#4. Save data
+
+```{r, echo=FALSE}
+
+save(use.wt, file=paste0(root, "/Wildtrax/Wildtrax_", Sys.Date(), "_Wrangled.Rdata"))
+```
+

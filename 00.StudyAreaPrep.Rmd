@@ -1,0 +1,85 @@
+---
+title: "00.StudyAreaPrep"
+author: "Angela Moreras"
+date: "2024-02-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+In this document will have the study area shapefile, along with the BCR shapefile use in the National Models v5, to avoid using different sources for the BCRs delimitations.
+
+Load packages
+
+```{r}
+library(tidyverse) #basic data wrangling
+library(terra) #basic raster handling
+library(sf) #basic shapefile handling
+```
+
+#BCR
+
+Fist set the right projections
+```{r}
+projection.trans<-5072
+projection.st_as_sf<-4326
+```
+
+Read in BCR shapefile and select the BCRs needed. Plot the map to check it is okay.
+```{r}
+
+bcr <- read_sf(file.path("G:/Shared drives/BAM_NationalModels/NationalModels5.0/Regions/BAM_BCR_NationalModel.shp")) %>% 
+  dplyr::filter(subUnit %in%  c(80,81,82,12,14)) %>% 
+  st_transform(crs=projection.trans)
+
+ggplot(bcr) +
+  geom_sf(aes(fill=factor(subUnit)))
+```
+
+
+#Study Area
+
+Read Study Area shape file
+
+```{r}
+#root<- "C:/Users/Angie/OneDrive - Université Laval/Regional_models"
+root<-"C:/Users/ANMOD4/OneDrive - Université Laval/Regional_models"
+
+StudyArea<-read_sf(file.path(root, "Study_area/BCR81214_Can/BCR81214_Can.shp"))
+
+StudyArea.trans<- st_transform(StudyArea,crs=projection.trans)  #same projection
+```
+
+Crop the BCR file to the extent of the Study area
+
+```{r}
+bcr.StudyArea <- bcr %>% 
+  st_intersection(StudyArea.trans) %>% 
+  mutate(country="ca")
+
+ggplot(bcr.StudyArea) +
+  geom_sf(aes(fill=factor(subUnit)))
+```
+
+Fused the BCR units to create shapefile for the model. 
+For the EHJV purposes we are running models for the study area as a unit, while the national models were run by BCR. 
+ 
+```{r}
+
+StudyAreaFused<- bcr.StudyArea %>% 
+  summarise() %>% # not an obvious geometry merge tool, but quite effective :)
+  mutate(area = st_area(.))
+
+ggplot(StudyAreaFused) +
+  geom_sf()
+```
+NOTE: It seems that is possible to accelerate the process of data extraction  in wildtrax (1.1.) by fusing the BCR subunits. However we did not use this fused map for this purpose 
+
+# Save
+In this case I kept the shape file with the BCR borders. 
+```{r}
+save(bcr.StudyArea, StudyAreaFused, file=paste0(root, "/Analisis_RM/StudyArea/StudyArea", ".Rdata"))
+```

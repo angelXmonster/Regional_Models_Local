@@ -1,0 +1,129 @@
+---
+title: "1.2. ebirdDataExtraction"
+author: "Angela Moreras"
+date: "2024-03-07"
+output: html_document
+---
+
+This document is based on the workflow produce by Elly Knight to produce BAM's National models v5. 
+The first part of the code is a exact copy of the version (until point #7) produce for the National models v5 (01.DataWrangling section B.GET EBIRD DATA)
+
+Note: Data from eBird is download manually after filling a form to get access to it (https://ebird.org/data/download/ebd). Also auk package requires to install Cygwin software in your computer  (https://www.cygwin.com/install.html) at the default folder (otherwise is no going to be detected by R). For further instruction in the use of auk package see https://cornelllabofornithology.github.io/auk/articles/auk.html 
+
+#0. Prep
+
+```{r}
+library(tidyverse) #basic data wrangling
+library(data.table) #for binding lists into dataframes
+library(lubridate) #date wrangling
+library(auk) #eBird wrangling
+library(purrr) #Mapping functions to read in multiple files
+library(sf) #read in & handle study area
+library(terra) #raster management
+```
+
+```{r}
+root <- "C:/Users/Angie/OneDrive - Université Laval/Regional_models/Analisis_RM"
+root.drive<- "G:/Shared drives/BAM_NationalModels/NationalModels5.0/Data"
+
+load(file.path(root, "/StudyArea",".Rdata"))
+```
+#1. Get list of ebd objects to process
+
+Note: Before running this part of the code ensure that folder ebd_raw and ebd_filtered are created. 
+In folder ebd_raw are going to be all the folders containing the ebd data. 
+
+```{r}
+auk_set_ebd_path(file.path(root, "eBird/ebd_raw"), overwrite=TRUE) #Set path
+
+ebd.files <- grep(list.files(file.path(root, "/eBird/ebd_raw"),recursive = TRUE, pattern="ebd_*"), pattern='sampling', invert=TRUE, value=TRUE) #find ebd files except the sampling ones
+  
+```
+
+
+#2. Filter data
+
+We are only using stationary data with a range duration from 0 to 10 min, to resemble  point count data.
+Data is save keeping in the folder ebd_filtered.
+
+```{r}
+for(i in 1:length(ebd.files)){
+  
+  file<-tail(unlist(strsplit(ebd.files[i],"/")),n=1)
+  
+  # Define filters and save filtered data
+  # this may take several hours. 
+  filtered <- auk_ebd(ebd.files[i]) %>% 
+    auk_protocol("Stationary") %>% 
+    auk_duration(c(0, 10)) %>% 
+    auk_filter(file=file.path(root, "eBird/ebd_filtered", file), overwrite=TRUE, 
+               keep = c("group identifier", "sampling_event_identifier", "scientific name", "common_name",
+                        "observation_count", "latitude", "longitude", "locality_type", "observation_date",
+                        "time_observations_started", "observer_id", "duration_minutes"))
+  
+}
+
+```
+
+
+#3. Wrangle ebird data
+Note that for eBird data is no count was made, an 'X' is used to indicate presence. Therefore, here observations with "X" are assume to be 1 individual. 
+Hotspots are remove from the data
+```{r}
+ebd.files.done <- list.files(file.path(root, "eBird", "ebd_filtered"), pattern="ebd_|.txt", full.names=TRUE)
+
+#Read all ebd files as one element
+#Note this next line takes a long time to run (couple hours)
+raw.ebd <- purrr::map(.x=ebd.files.done, .f=~read_ebd(.)) %>%  
+  rbindlist()
+
+#get species scientific name and code
+tax.wt <- read.csv(file.path(root.drive, "Lookups/", "lu_species.csv")) %>%  
+  mutate(scientific_name = paste(species_genus, species_name)) %>% 
+  dplyr::select(scientific_name, species_code)
+
+#columns to select
+colnms <- c("source", "organization", "project_id", "sensor", "tag_method", "location_id", "buffer", "latitude", "longitude", "year", "date", "observer_id", "duration", "distance", "species_code", "abundance")
+
+#create the 
+wrangle.ebd <- raw.ebd %>% 
+  dplyr::filter(locality_type!="H") %>% 
+  mutate(source = "eBird",
+         organization = "eBird",
+         project_id= "eBird",
+         sensor="PC",
+         tag_method="PC",
+         singlesp="n",
+         buffer=0,
+         date = ymd_hms(paste0(observation_date, time_observations_started)),
+         year = year(date),
+         distance = Inf,
+         abundance = as.numeric(ifelse(observation_count=="X", 1, observation_count))) %>% 
+  rename(duration = duration_minutes,
+         location_id = sampling_event_identifier) %>% 
+  left_join(tax.wt) %>% 
+  dplyr::select(all_of(colnms)) %>% 
+  dplyr::filter(!is.na(date))
+```
+#4. Crop data to study site 
+```{r}
+ebd.shape <- wrangle.ebd %>% 
+             distinct(location_id, .keep_all = TRUE)%>% #use only unique locations
+                    sf::st_as_sf(coords = c("longitude", "latitude"), crs=projection.st_as_sf) %>% 
+                                                              #transform data to shape file
+                    st_transform(projection.trans) %>%        #Change projection to match
+                    st_crop(bcr.sa) 
+
+
+ebd.shape.re<-st_intersection(ebd.shape, bcr.sa) #get rid of points outside the Study Area
+     
+unique.loc<- ebd.shape.re$location_id #which location are in the study area
+      
+use.ebd<- wrangle.ebd %>% filter(location_id %in% unique.loc)
+```
+
+# 5. Save
+```{r}
+save(use.ebd, file=paste0(root, "/eBird/ebd", Sys.Date(), ".Rdata"))
+```
+  
