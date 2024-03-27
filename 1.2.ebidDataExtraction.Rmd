@@ -26,7 +26,7 @@ library(terra) #raster management
 root <- "C:/Users/Angie/OneDrive - Université Laval/Regional_models/Analisis_RM"
 root.drive<- "G:/Shared drives/BAM_NationalModels/NationalModels5.0/Data"
 
-load(file.path(root, "/StudyArea",".Rdata"))
+load(file.path(root, "StudyArea","StudyArea.Rdata"))
 ```
 #1. Get list of ebd objects to process
 
