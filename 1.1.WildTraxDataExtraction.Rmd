@@ -429,6 +429,7 @@ Here we also select the columns of interest for the next steps of the modeling w
   
 ```{r}
 use.wt<-dat.wt%>%
+  filter(individual_count!=0)%>%                                #exclude zero counts
   group_by(organization, project_id, sensor, location_id, recording_id, date, task_id, tag_method, observer_id,
            species_code) %>%                                    #group to find the abundance
   mutate(abundance= ifelse(tag_method=="PC", individual_count,  #calculate abundance
