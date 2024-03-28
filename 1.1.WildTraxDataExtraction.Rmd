@@ -395,7 +395,7 @@ dat.tmtt <- dat %>%
 ##3.2. Caclulate duration and distance
 
 Here we extract the maximum survey distance and duration. Now we extract both values are now going to be sorted in two new columns called duration and distance along with the duration of the ARU task in min rather than seconds. 
-Also we fix the task_method so that all PC data points are no longer NA but "PC".
+Also we fix the task_method so that all PC data points are no longer NA but "PC". Finally we fix the location_buffer_m so all NAs are transform to 0. 
 
 ```{r}
 dat.wt <- dat.tmtt %>%  
@@ -407,7 +407,8 @@ dat.wt <- dat.tmtt %>%
          duration_replace= gsub("min","", survey_duration_method), #replace min
          duration_max= as.integer(tail(unlist(strsplit(duration_replace,"-", " ")), n=1)),   #select the last number
          duration=ifelse(is.na(duration_max), as.numeric(gsub("s","", task_duration))/60, duration_max),
-         tag_method=ifelse(is.na(task_method) & sensor=="PC", "PC", task_method)) %>%
+         tag_method=ifelse(is.na(task_method) & sensor=="PC", "PC", task_method),
+         location_buffer_m=ifelse(is.na(location_buffer_m), 0, location_buffer_m)) %>%
   dplyr::select(-distance_replace, -duration_replace, -task_method) #Drop the unnecessary variable
 ```
 
