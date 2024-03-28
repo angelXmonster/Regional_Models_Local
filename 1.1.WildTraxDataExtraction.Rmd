@@ -380,28 +380,19 @@ load(file.path(root, "wildtrax_raw_2024-03-05.Rdata"))
 load(file.path(root.drive,"WildTrax/", "wildtrax_rawManual&projects_2024-03-21.Rdata"))
 ```
 
-  
-##4.2 Get list of bird species
 
-```{r}
-library(QPAD)
-load_BAM_QPAD(3)
-spp <- QPAD::getBAMspecieslist()
-```
+##3.1. Replace tmtt
 
-##4.2. Replace tmtt
-
-First get rid of species that are not birds and birds from which we can calculate offsets (using QPAD). Then fix the individual count label as tmtt (i.e., too many to tag) in the ARU sensor using the wt_replace_tmtt function which considers the observer_id. 
+Fix the individual count label as tmtt (i.e., too many to tag) in the ARU sensor using the wt_replace_tmtt function which considers the observer_id. 
 
 ```{r}
 dat.tmtt <- dat %>%
-  filter(species_code %in% spp)%>%                #filter species 
   wt_replace_tmtt()%>%                            #replace tmmtt
   mutate(across(individual_count, as.integer))%>% #change individual_count to integer
   filter(!is.na(individual_count))                #get rid of NAs
 ```
 
-##4.3. Caclulate duration and distance
+##3.2. Caclulate duration and distance
 
 Here we extract the maximum survey distance and duration. Now we extract both values are now going to be sorted in two new columns called duration and distance along with the duration of the ARU task in min rather than seconds. 
 Also we fix the task_method so that all PC data points are no longer NA but "PC".
@@ -420,7 +411,7 @@ dat.wt <- dat.tmtt %>%
   dplyr::select(-distance_replace, -duration_replace, -task_method) #Drop the unnecessary variable
 ```
 
-##4.3. Calculate abundance and select columns
+##3.3. Calculate abundance and select columns
 
 Here it is important to highlight that PC individual_count is the abundance for each location; however, the abundance is more complicated. ARU recordings can by transcribe by two different methods: 1 tag per individual per species per minute (i.e., 1SPM) and 1 tag per individual per species per task (i.e., 1SPT). This means that for 1SPM a new row is added per individual per species per minute (if it is heard in the subsequent minutes). Moreover, the ARU observer can establish in the individual_count column how many individuals are in each detection (box detection, for more details see https://wildtrax.ca/resources/user-guide/#acoustic-data), but the individual_order column keeps the record of how many individuals of the same species where heard in the recording. In other words, if you hear two Ovenbirds (OVEN), the first individual would be tagged as “1” and the second OVEN as “2”, and therefore the abundance is 2. Yet because we have some case where the individual_order does not reflect all the individual that are in the individual_count, as well as the tmtt cases, we need to sum those.  
 
