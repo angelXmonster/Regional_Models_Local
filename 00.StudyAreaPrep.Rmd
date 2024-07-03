@@ -20,6 +20,11 @@ library(terra) #basic raster handling
 library(sf) #basic shapefile handling
 ```
 
+#Set folders
+```{r}
+root<- "."
+```
+
 #BCR
 
 Fist set the right projections
@@ -31,7 +36,7 @@ projection.st_as_sf<-4326
 Read in BCR shapefile and select the BCRs needed. Plot the map to check it is okay.
 ```{r}
 
-bcr <- read_sf(file.path("G:/Shared drives/BAM_NationalModels/NationalModels5.0/Regions/BAM_BCR_NationalModel.shp")) %>% 
+bcr <- read_sf(file.path("G:/Shared drives/BAM_NationalModels5/Regions/BAM_BCR_NationalModel.shp")) %>% 
   dplyr::filter(subUnit %in%  c(80,81,82,12,14)) %>% 
   st_transform(crs=projection.trans)
 
@@ -45,8 +50,7 @@ ggplot(bcr) +
 Read Study Area shape file
 
 ```{r}
-#root<- "C:/Users/Angie/OneDrive - Université Laval/Regional_models"
-root<-"C:/Users/ANMOD4/OneDrive - Université Laval/Regional_models"
+root<-"."
 
 StudyArea<-read_sf(file.path(root, "Study_area/BCR81214_Can/BCR81214_Can.shp"))
 
@@ -81,5 +85,6 @@ NOTE: It seems that is possible to accelerate the process of data extraction  in
 # Save
 In this case I kept the shape file with the BCR borders. 
 ```{r}
-save(bcr.StudyArea, StudyAreaFused, file=paste0(root, "/Analisis_RM/StudyArea/StudyArea", ".Rdata"))
+save(bcr.StudyArea, StudyAreaFused, file=paste0(root, "/StudyArea.Rdata"))
+st_write(bcr.StudyArea, paste0(root, "/Study_area/StudyArea_wrangled.shp")) 
 ```

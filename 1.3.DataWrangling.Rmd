@@ -1,0 +1,186 @@
+---
+title: "1.3. DataWrangling"
+output: html_document
+date: "2024-03-26"
+---
+
+This document is based on the workflow produce by Elly Knight to produce BAM's National models v5.
+
+This module puts together data from Wildtrax and eBird. Then data is wrangled to remove duplicates, remove buffered locations and location outside QPAD limits, and finally it separates the visits from the abundance bird information.   
+Note that a visit refers to a survey with unique location (latitude, longitude) and date, along with the sensor type, data source, project_id, observer_id, duration and distance. 
+
+Outputs:
+->visit= unique visits
+->bird= abundance by species per visit
+
+#0. Prep
+
+```{r}
+library(tidyverse) #basic data wrangling
+library(data.table) #for binding lists into dataframes
+library(lubridate) #date wrangling
+library(purrr) #Mapping functions to read in multiple files
+library(sf) #read in & handle study area
+library(terra) #raster management
+library(dggridR) #to make grid for checking for duplicates
+library(kableExtra) #Show tables
+library(QPAD)
+```
+Set the root folder and load wildtrax and eBird data
+```{r}
+root <- "."
+
+load (file=paste0(root, "/Wildtrax/Wildtrax_2024-06-27_Wrangled", ".Rdata"))
+load (file=paste0(root, "/eBird/ebd2024-03-26", ".Rdata"))
+```
+
+
+
+#1. Put everything together
+
+Put together eBird and wildtrax data
+
+```{r}
+use <- rbind(use.wt, use.ebd)%>%
+  filter(!is.na(species_code))
+```
+
+
+#2. Remove duplicates 
+
+##2.1. Extract locations
+```{r}
+loc <- use %>% 
+  select(source, organization, project_id, sensor, location_id, latitude, longitude) %>% 
+  unique()
+```
+
+
+
+Visit are refer here as the location pair with the year/date. Because it is possible that we have the same visits from the two different data sources (i.e., WildTrax and eBird), and even coming from the same source we need to remove duplicates.
+
+##3.1. Check visit dupliates 
+
+We first set up a grip
+
+```{r}
+grid <- dgconstruct(area=0.2, metric=TRUE)
+```
+
+Then identify which locations that share a grid cell which are going to be placed in the object n.grid
+
+```{r}
+loc.grid <- loc %>% 
+  mutate(cell = dgGEO_to_SEQNUM(grid, longitude, latitude)$seqnum) #create the cell column using the grid and the location
+
+n.grid <- loc.grid %>%  
+  group_by(cell) %>%   #group by cell 
+  summarize(n=n()) %>% #sum the locations in the same cell 
+  ungroup() %>%  
+  filter(n > 1) %>%    #select locations that share same cell
+  left_join(loc.grid)
+```
+After identifying which locations share the same cell (i.e., n.grid),  we link it to visit data (i.e., visit.grid), then we identify surveys that share cell, duration, year/date and abundance by species. 
+
+```{r}
+visit.grid <- n.grid %>% 
+left_join(use)
+
+
+visit.n <- visit.grid %>% 
+ group_by(cell, latitude, longitude, date, duration, distance, species_code, 
+          abundance) %>%             #group ignoring the source and sensor 
+  mutate(n = n())%>%                  #how many identical data points 
+  ungroup()%>% 
+  filter(n > 1)                       #ignore data points that don't have duplicates
+
+#knitr::kable(head(visit.n[1:10,]), "pipe", align = "c")
+```
+
+##3.2. Remove duplicates species in same visit
+
+Given that is possible to find duplicates within the same project_id (in this case project 838), we need to get rid of duplicates at the species level rather than as the visit level.
+
+Note that the distinct function will keep the first row by group, because Wildtrax data was rbind first this means that in cases where the duplicates are from different sources the selected source will be Wildtrax. 
+
+```{r}
+visit.grid <- loc.grid %>% 
+  left_join(use) 
+
+use.dat <- visit.grid %>% 
+  group_by(cell, latitude, longitude, date, duration, distance, 
+           species_code, abundance) %>%         #group ignoring the source and sensor 
+  distinct(species_code, .keep_all = TRUE)%>%   #keep one row by species 
+  ungroup()
+```
+
+##3.3. Check that all duplicates are removed
+Note that if all duplicates were removed use.dat.check has 0 observations
+```{r}
+use.dat.check <- use.dat %>% 
+  group_by(cell, latitude, longitude, date, duration, distance, 
+           species_code, abundance) %>%         #group ignoring the source and sensor 
+  mutate(n = n())%>%                  #how many identical data points 
+  ungroup()%>% 
+  filter(n > 1)  
+```
+
+
+#4. Removed buffered locations and locations outside QPAD limits
+```{r}
+dat <- use.dat %>% 
+  dplyr::filter(location_buffer_m==0,
+                longitude >= -164,
+                longitude <= -52,
+                latitude >= 39,
+                latitude <= 69)
+```
+
+#5. Separte data into visits and observations
+
+##5.1. Identify unique visits
+
+Here we will identify unique visits and  add a primary key, which is going to be the row number as an id. 
+Note that visit are not only unique latitude, longitude and date, but also project_id, source, sensor, duration, distance and observer_id. 
+```{r}
+visit <- dat %>% 
+  select(-species_code, -abundance) %>% 
+  unique() %>% 
+  mutate(id = row_number()) %>% 
+  filter(!is.na(duration),
+         !is.na(distance))
+
+#Visit if we only want to consider latitude, longitude and date. 
+#visit <- dat %>% 
+ # select(-species_code, -abundance) %>% 
+  #distinct(latitude,longitude, date, .keep_all = TRUE)%>%
+  #mutate(id = row_number()) %>% 
+  #filter(!is.na(duration),
+   #      !is.na(distance))
+```
+
+##5.2. Tidy bird data
+
+Get list of bird species from QPAD
+
+```{r}
+load_BAM_QPAD(3)
+spp <- QPAD::getBAMspecieslist()
+```
+
+Filter to QPAD V4 species list. Remove unknown abundance. Finally, link to primary key and make wide with pivot_wider. This last part is going to show the abundace of each species by unique location. 
+
+```{r}
+bird <- dat %>% 
+  filter(!is.na(duration),            #exclude data points without duration 
+         !is.na(distance),            #exclude data points without distance
+         species_code %in% spp) %>%   #use species on QPAD
+  full_join(visit) %>% 
+  mutate(species_code = ifelse(is.na(species_code), "NONE", species_code)) %>% #NAs replace by NONE
+  pivot_wider(id_cols=id, names_from=species_code, values_from=abundance, values_fn=sum, values_fill=0, names_sort=TRUE) 
+```
+
+#6. Save
+```{r}
+save(visit, bird, file=file.path(root, "1_RM_data_clean.R"))
+```
